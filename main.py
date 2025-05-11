@@ -1,23 +1,22 @@
-import requests
-from bs4 import BeautifulSoup
-from dotenv import load_dotenv
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
 from urllib.parse import urljoin
 from datetime import datetime, timedelta
-import time
 import random
 import json
 import os
 import asyncio
+import requests
+from bs4 import BeautifulSoup
 from telegram import Bot
 from telegram.error import TelegramError
+from dotenv import load_dotenv
 
 load_dotenv()
 
 PAGES_URLS = [
     "https://www.kufar.by/l/kompyuternaya-tehnika/noutbuki/nb~apple?clp=v.or%3A66&cursor=eyJ0IjoiYWJzIiwiZiI6dHJ1ZSwicCI6MX0%3D&sort=lst.d",
-    "https://www.kufar.by/l/kompyuternaya-tehnika/noutbuki/nb~apple?clp=v.or%3A66&cursor=eyJ0IjoiYWJzIiwiZiI6dHJ1ZSwicCI6MiwicGl0IjoiMjkxMTUxMjEifQ%3D%3D&sort=lst.d"
+    "https://www.kufar.by/l/kompyuternaya-tehnika/noutbuki/nb~apple?clp=v.or%3A66&cursor=eyJ0IjoiYWJzIiwiZiI6dHJ1ZWSJCI6MiwicGl0IjoiMjkxMTUxMjEifQ%3D%3D&sort=lst.d"
 ]
 
 HEADERS = {
@@ -29,13 +28,11 @@ DATA_FILE = "data.json"
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-
 def format_price(price_str):
     try:
         return int(price_str.replace(" ", "").replace("р.", ""))
     except:
         return None
-
 
 def parse_datetime(time_element):
     try:
@@ -52,7 +49,6 @@ def parse_datetime(time_element):
     except Exception as e:
         print(f"Ошибка парсинга времени: {str(e)}")
         return None
-
 
 def parse_page(url):
     try:
@@ -83,7 +79,9 @@ def parse_page(url):
             region = region_element.get_text(strip=True).replace("Минск, ", "") if region_element else "Не указан"
             time_element = item.find("span", class_="styles_secondary__MzdEb")
             parsed_time = parse_datetime(time_element)
-            link = urljoin(BASE_URL, item.get("href", ""))
+            raw_href = item.get("href", "")
+            clean_href = raw_href.split('?')[0]
+            link = urljoin(BASE_URL, clean_href)
 
             listings.append({
                 "title": title,
@@ -98,7 +96,6 @@ def parse_page(url):
             continue
 
     return listings
-
 
 def create_excel_file(data, filename="noutbuki.xlsx"):
     wb = Workbook()
@@ -154,18 +151,20 @@ def create_excel_file(data, filename="noutbuki.xlsx"):
     wb.save(filename)
     print(f"\nФайл {filename} успешно создан!")
 
-
 def load_data():
     if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+        try:
+            with open(DATA_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except json.JSONDecodeError:
+            print("Ошибка чтения файла данных. Возможно, файл повреждён.")
+            return []
     return []
-
 
 def save_data(data):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=4)
-
+    print("Данные успешно сохранены.")
 
 def find_changes(old_data, new_data):
     old_dict = {item['link']: item for item in old_data}
@@ -175,8 +174,8 @@ def find_changes(old_data, new_data):
     updated_items = [item for link, item in new_dict.items()
                      if link in old_dict and item['price'] != old_dict[link]['price']]
 
+    print(f"Найдено новых объявлений: {len(new_items)}, обновлённых: {len(updated_items)}")
     return new_items, updated_items
-
 
 def format_message(item, is_new):
     emoji = "🆕" if is_new else "🔄"
@@ -189,13 +188,18 @@ def format_message(item, is_new):
         f"🔗 {item['link']}"
     )
 
-
 async def send_telegram_notification(bot, new_items, updated_items):
+    if not new_items and not updated_items:
+        print("Нет новых или обновлённых объявлений для отправки.")
+        return
+
+    total_sent = 0
     for item in new_items:
         message = format_message(item, is_new=True)
         try:
             await bot.send_message(chat_id=CHAT_ID, text=message)
             await asyncio.sleep(1)
+            total_sent += 1
         except TelegramError as e:
             print(f"Ошибка отправки: {e}")
 
@@ -204,15 +208,19 @@ async def send_telegram_notification(bot, new_items, updated_items):
         try:
             await bot.send_message(chat_id=CHAT_ID, text=message)
             await asyncio.sleep(1)
+            total_sent += 1
         except TelegramError as e:
             print(f"Ошибка отправки: {e}")
 
+    print(f"Успешно отправлено сообщений: {total_sent}")
 
 async def job(bot):
     print("\nНачало парсинга...")
     all_items = []
     for url in PAGES_URLS:
-        all_items.extend(parse_page(url))
+        items = parse_page(url)
+        all_items.extend(items)
+        print(f"Спарсено {len(items)} объявлений с {url}")
         await asyncio.sleep(random.uniform(2, 4))
 
     create_excel_file(all_items)
@@ -222,19 +230,16 @@ async def job(bot):
     if new_items or updated_items:
         await send_telegram_notification(bot, new_items, updated_items)
         save_data(all_items)
-        print("Уведомления отправлены.")
     else:
-        print("Изменений нет.")
-
+        print("Изменений нет, данные не сохранены.")
 
 async def main():
     bot = Bot(token=TELEGRAM_TOKEN)
-    await job(bot)  # Первый запуск
+    await job(bot)
 
     while True:
-        await asyncio.sleep(3 * 3600)  # Ожидание 3 часа
+        await asyncio.sleep(3 * 3600)
         await job(bot)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
