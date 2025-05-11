@@ -1,0 +1,6 @@
+requests
+beautifulsoup4
+openpyxl
+python-telegram-bot==20.5
+aiohttp
+python-dotenv
