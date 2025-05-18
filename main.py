@@ -28,41 +28,49 @@ DATA_FILE = "data.json"
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
+
 def format_price(price_str):
     try:
-        return int(price_str.replace(" ", "").replace("р.", ""))
-    except:
+        return int(price_str.replace(" ", "").replace("р.", "").strip())
+    except (ValueError, AttributeError):
         return None
 
+
 def parse_datetime(time_element):
+    if not time_element:
+        return None
+
     try:
         time_str = time_element.get_text(strip=True)
         if "Сегодня" in time_str:
             time_str = time_str.replace("Сегодня, ", "")
-            return datetime.now().replace(hour=int(time_str.split(":")[0]), minute=int(time_str.split(":")[1]))
+            time_part = datetime.strptime(time_str, "%H:%M")
+            return datetime.now().replace(hour=time_part.hour, minute=time_part.minute, second=0, microsecond=0)
         elif "Вчера" in time_str:
             time_str = time_str.replace("Вчера, ", "")
+            time_part = datetime.strptime(time_str, "%H:%M")
             date = datetime.now() - timedelta(days=1)
-            return date.replace(hour=int(time_str.split(":")[0]), minute=int(time_str.split(":")[1]))
+            return date.replace(hour=time_part.hour, minute=time_part.minute, second=0, microsecond=0)
         else:
             return datetime.strptime(time_str, "%d.%m.%Y %H:%M")
     except Exception as e:
         print(f"Ошибка парсинга времени: {str(e)}")
         return None
 
+
 def parse_page(url):
     try:
         response = requests.get(url, headers=HEADERS, timeout=15)
         response.raise_for_status()
-    except Exception as e:
-        print(f"Ошибка запроса: {str(e)}")
+    except requests.RequestException as e:
+        print(f"Ошибка запроса {url}: {str(e)}")
         return []
 
     soup = BeautifulSoup(response.text, "html.parser")
     container = soup.find("div", {"class": "styles_cards__bBppJ"})
 
     if not container:
-        print("Контейнер объявлений не найден!")
+        print(f"Контейнер объявлений не найден на странице {url}!")
         return []
 
     listings = []
@@ -72,7 +80,8 @@ def parse_page(url):
             continue
 
         try:
-            title = item.find("h3", class_="styles_title__F3uIe").get_text(strip=True)
+            title = item.find("h3", class_="styles_title__F3uIe").get_text(strip=True) if item.find("h3",
+                                                                                                    class_="styles_title__F3uIe") else "Без названия"
             price_element = item.find("p", class_="styles_price__aVxZc")
             price = format_price(price_element.get_text(strip=True)) if price_element else None
             region_element = item.find("p", class_="styles_region__qCRbf")
@@ -97,7 +106,12 @@ def parse_page(url):
 
     return listings
 
+
 def create_excel_file(data, filename="noutbuki.xlsx"):
+    if not data:
+        print("Нет данных для создания файла Excel")
+        return
+
     wb = Workbook()
     ws = wb.active
     ws.title = "Ноутбуки Apple"
@@ -120,11 +134,11 @@ def create_excel_file(data, filename="noutbuki.xlsx"):
     for idx, item in enumerate(data, 1):
         ws.append([
             idx,
-            item["title"],
-            item["price"],
-            item["region"],
-            item["time"] if item["time"] else "Нет данных",
-            item["link"]
+            item.get("title", "Нет данных"),
+            item.get("price", "Нет данных"),
+            item.get("region", "Нет данных"),
+            item.get("time", "Нет данных"),
+            item.get("link", "Нет данных")
         ])
 
         for col in range(1, len(headers) + 1):
@@ -148,47 +162,71 @@ def create_excel_file(data, filename="noutbuki.xlsx"):
     ws.auto_filter.ref = ws.dimensions
     ws.freeze_panes = "A2"
 
-    wb.save(filename)
-    print(f"\nФайл {filename} успешно создан!")
+    try:
+        wb.save(filename)
+        print(f"\nФайл {filename} успешно создан!")
+    except PermissionError:
+        print(f"\nОшибка: Не удалось сохранить файл {filename}. Возможно, файл открыт в другой программе.")
+
 
 def load_data():
-    if os.path.exists(DATA_FILE):
-        try:
-            with open(DATA_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except json.JSONDecodeError:
-            print("Ошибка чтения файла данных. Возможно, файл повреждён.")
-            return []
-    return []
+    if not os.path.exists(DATA_FILE):
+        return []
+
+    try:
+        with open(DATA_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        print(f"Ошибка чтения файла данных: {str(e)}")
+        return []
+
 
 def save_data(data):
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=4)
-    print("Данные успешно сохранены.")
+    try:
+        with open(DATA_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
+        print("Данные успешно сохранены.")
+    except IOError as e:
+        print(f"Ошибка сохранения данных: {str(e)}")
+
 
 def find_changes(old_data, new_data):
     old_dict = {item['link']: item for item in old_data}
     new_dict = {item['link']: item for item in new_data}
 
     new_items = [item for link, item in new_dict.items() if link not in old_dict]
-    updated_items = [item for link, item in new_dict.items()
-                     if link in old_dict and item['price'] != old_dict[link]['price']]
+    updated_items = []
+
+    for link, item in new_dict.items():
+        if link in old_dict:
+            old_item = old_dict[link]
+            if item['price'] != old_item['price']:
+                updated_items.append(item)
+            elif item['title'] != old_item['title'] or item['region'] != old_item['region']:
+                updated_items.append(item)
 
     print(f"Найдено новых объявлений: {len(new_items)}, обновлённых: {len(updated_items)}")
     return new_items, updated_items
 
+
 def format_message(item, is_new):
     emoji = "🆕" if is_new else "🔄"
+    price = f"{item['price']} BYN" if item.get('price') else "Цена не указана"
     return (
-        f"{emoji} {'Новое объявление' if is_new else 'Обновление цены'}\n"
-        f"📌 {item['title']}\n"
-        f"💰 {item['price']} BYN\n"
-        f"📍 {item['region']}\n"
-        f"🕒 {item['time']}\n"
-        f"🔗 {item['link']}"
+        f"{emoji} {'Новое объявление' if is_new else 'Обновление'}\n"
+        f"📌 {item.get('title', 'Без названия')}\n"
+        f"💰 {price}\n"
+        f"📍 {item.get('region', 'Регион не указан')}\n"
+        f"🕒 {item.get('time', 'Время не указано')}\n"
+        f"🔗 {item.get('link', 'Ссылка отсутствует')}"
     )
 
+
 async def send_telegram_notification(bot, new_items, updated_items):
+    if not TELEGRAM_TOKEN or not CHAT_ID:
+        print("Токен Telegram или ID чата не установлены. Уведомления не будут отправлены.")
+        return
+
     if not new_items and not updated_items:
         print("Нет новых или обновлённых объявлений для отправки.")
         return
@@ -197,25 +235,26 @@ async def send_telegram_notification(bot, new_items, updated_items):
     for item in new_items:
         message = format_message(item, is_new=True)
         try:
-            await bot.send_message(chat_id=CHAT_ID, text=message)
-            await asyncio.sleep(1)
+            await bot.send_message(chat_id=CHAT_ID, text=message, disable_web_page_preview=True)
+            await asyncio.sleep(random.uniform(1, 2))  # Добавляем случайную задержку
             total_sent += 1
         except TelegramError as e:
-            print(f"Ошибка отправки: {e}")
+            print(f"Ошибка отправки сообщения: {e}")
 
     for item in updated_items:
         message = format_message(item, is_new=False)
         try:
-            await bot.send_message(chat_id=CHAT_ID, text=message)
-            await asyncio.sleep(1)
+            await bot.send_message(chat_id=CHAT_ID, text=message, disable_web_page_preview=True)
+            await asyncio.sleep(random.uniform(1, 2))
             total_sent += 1
         except TelegramError as e:
-            print(f"Ошибка отправки: {e}")
+            print(f"Ошибка отправки сообщения: {e}")
 
     print(f"Успешно отправлено сообщений: {total_sent}")
 
+
 async def job(bot):
-    print("\nНачало парсинга...")
+    print(f"\nНачало парсинга в {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}...")
     all_items = []
     for url in PAGES_URLS:
         items = parse_page(url)
@@ -223,23 +262,39 @@ async def job(bot):
         print(f"Спарсено {len(items)} объявлений с {url}")
         await asyncio.sleep(random.uniform(2, 4))
 
-    create_excel_file(all_items)
-    old_data = load_data()
-    new_items, updated_items = find_changes(old_data, all_items)
+    if all_items:
+        create_excel_file(all_items)
+        old_data = load_data()
+        new_items, updated_items = find_changes(old_data, all_items)
 
-    if new_items or updated_items:
-        await send_telegram_notification(bot, new_items, updated_items)
-        save_data(all_items)
+        if new_items or updated_items:
+            await send_telegram_notification(bot, new_items, updated_items)
+            save_data(all_items)
+        else:
+            print("Изменений нет, данные не сохранены.")
     else:
-        print("Изменений нет, данные не сохранены.")
+        print("Не удалось получить данные с сайта.")
+
 
 async def main():
-    bot = Bot(token=TELEGRAM_TOKEN)
-    await job(bot)
+    if not TELEGRAM_TOKEN or not CHAT_ID:
+        print("Предупреждение: Токен Telegram или ID чата не установлены. Уведомления не будут отправляться.")
+
+    bot = Bot(token=TELEGRAM_TOKEN) if TELEGRAM_TOKEN else None
 
     while True:
-        await asyncio.sleep(3 * 3600)
-        await job(bot)
+        try:
+            await job(bot)
+            await asyncio.sleep(3 * 3600)  # Ожидание 3 часа перед следующим запуском
+        except Exception as e:
+            print(f"Критическая ошибка в основном цикле: {str(e)}")
+            await asyncio.sleep(3600)  # Ожидание 1 час после ошибки
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nРабота программы остановлена пользователем")
+    except Exception as e:
+        print(f"Критическая ошибка: {str(e)}")
